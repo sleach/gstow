@@ -1,0 +1,7 @@
+*.swp
+tags
+vendor/
+tmp/
+dist
+build
+gstow
