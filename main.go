@@ -1,72 +1,152 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
-
-	"gopkg.in/urfave/cli.v1"
+	"path"
+	"path/filepath"
 )
 
-func main() {
-	app := cli.NewApp()
-	app.Name = "gstow"
-	app.Usage = "gstow is a stow replacement written in Golang"
-	app.Author = "Sean Leach <sleach@wiggum.com>"
-	app.EnableBashCompletion = true
-	app.Version = "1.0.0"
+var version = "1.0.0"
 
-	app.Flags = []cli.Flag{
-		cli.BoolFlag{
-			Name:  "dry-run",
-			Usage: "Just simulate/print what would happen",
-		},
-		cli.BoolFlag{
-			Name:  "force",
-			Usage: "Force overwrite of any existing symlinks",
-		},
-		cli.StringFlag{
-			Name:  "dir, d",
-			Usage: "Set gstow dir to DIR (default is current dir)",
-		},
-		cli.StringFlag{
-			Name:  "target, t",
-			Usage: "Set target gstow dir to DIR (default is parent of current dir)",
-		},
-		cli.StringSliceFlag{
-			Name:  "ignore",
-			Usage: "List of regular expressions of files to ignore",
-		},
-	}
+type arrayFlags []string
 
-	app.Commands = []cli.Command{
-		{
-			Name:    "stow",
-			Aliases: []string{"s"},
-			Usage:   "add a task to the list",
-			Action: func(c *cli.Context) error {
-				fmt.Println("added task: ", c.Args().First())
-				f1 := os.Args[1]
-				f2 := os.Args[2]
-				fs1, _ := os.Stat(f1)
-				fs2, _ := os.Stat(f2)
-				fmt.Printf("%s == %s => %v\n", f1, f2, os.SameFile(fs1, fs2))
-				return nil
-			},
-		},
-		{
-			Name:    "unstow",
-			Aliases: []string{"u"},
-			Usage:   "complete a task on the list",
-			Action: func(c *cli.Context) error {
-				fmt.Println("unstowed: ", c.Args().First())
-				return nil
-			},
-		},
-	}
+func (i *arrayFlags) String() string {
+	return "my string representation"
+}
 
-	err := app.Run(os.Args)
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
+type config struct {
+	dryRun  bool
+	verbose bool
+	dir     string
+	target  string
+	ignore  arrayFlags
+}
+
+// wrapper struct to hold information about source file
+type sourceFile struct {
+	fileInfo os.FileInfo
+	fileName string
+	path     string
+}
+
+func (s *sourceFile) DestSymlink(cfg *config) string {
+	return path.Join(cfg.target, s.fileName)
+}
+
+// Walk the source directory tree, returning the files that will need to be
+// symlinked
+func readSourceDir(dir string) ([]sourceFile, error) {
+	var files []sourceFile
+	fileInfo, err := ioutil.ReadDir(dir)
 	if err != nil {
-		log.Fatal(err)
+		return files, err
+	}
+	for _, f := range fileInfo {
+		fullPath := path.Join(dir, f.Name())
+		files = append(files, sourceFile{path: fullPath, fileName: f.Name(), fileInfo: f})
+	}
+	return files, nil
+}
+
+// This will read a directory and only return the symlinks
+func symlinks(dir string) ([]string, error) {
+	var files []string
+	fileInfo, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return files, err
+	}
+	for _, f := range fileInfo {
+		fullPath := path.Join(dir, f.Name())
+		fi, err := os.Lstat(fullPath)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
+			files = append(files, fullPath)
+		}
+	}
+	return files, nil
+}
+
+func stow(cfg *config) error {
+	files, err := readSourceDir(cfg.dir)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		log.Printf("stow: file=%s symlink=%s", file.path, file.DestSymlink(cfg))
+	}
+	return nil
+}
+
+func destow(cfg *config) error {
+	links, err := symlinks(cfg.target)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		log.Printf("destow: symlink=%s\n", link)
+	}
+	return nil
+}
+
+func main() {
+	var (
+		flagVersion bool
+		flagDestow  bool
+	)
+	cfg := &config{}
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "gstow version %s\n\nOPTIONS:\n\n", version)
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n\nReport bugs to: https://github.com/sleach/gstow")
+	}
+	flag.BoolVar(&flagVersion, "version", false, "Print version information and exit")
+	flag.BoolVar(&flagDestow, "D", false, "Unstow files, deleting symlinks")
+	flag.BoolVar(&cfg.verbose, "v", false, "Print extended information")
+	flag.BoolVar(&cfg.dryRun, "n", false, "Dry-run - combined with -v prints out actions but does not run them")
+	flag.StringVar(&cfg.dir, "d", "", "Source directory to read files")
+	flag.StringVar(&cfg.target, "t", "", "Target directory for where symlinks will be created")
+	flag.Var(&cfg.ignore, "ignore", "Regular express match for files to ignore (can be multiple)")
+	flag.Parse()
+
+	if flagVersion {
+		log.Fatal("gstow version 1.0.0")
+	}
+
+	if cfg.dir == "" {
+		log.Fatal("-d is a required flag")
+	}
+	fmt.Println(cfg.target)
+	if cfg.target == "" {
+		// this defaults to the parent directory of where this is being ran
+		wd, err := os.Getwd()
+		if err != nil {
+			log.Panic(err)
+		}
+		cfg.target = filepath.Dir(wd)
+	}
+
+	if flagDestow {
+		err := destow(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		err := stow(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 }
